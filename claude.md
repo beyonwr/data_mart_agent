@@ -16,10 +16,9 @@
 - **Tool Server**: FastMCP
 - **언어**: Python
 - **데이터 처리**: pandas, parquet
-- **RAG (Option 2 권장)**:
-  - Vector DB: ChromaDB (개발) → Qdrant (프로덕션)
-  - Embedding: OpenAI text-embedding-3-small
-  - 대안: Gemini text-embedding-004
+- **RAG**:
+  - Vector DB: ChromaDB (Docker 별도 실행, HTTP Client)
+  - Embedding: DNA (Qwen 14B 기반 한글 특화 모델, 별도 서버)
 
 ## 프로젝트 구조
 
@@ -31,11 +30,10 @@ data_mart_agent/
 ├── tools/                  # FastMCP 기반 도구 서버 (RAG 포함)
 │   ├── server.py          # FastMCP 서버 메인
 │   ├── datamart_client.py # 데이터 마트 API 클라이언트
-│   ├── rag_manager.py     # RAG 관리 (Option 2)
-│   ├── vectordb/          # ChromaDB 저장소 (Option 2)
+│   ├── rag_manager.py     # RAG 관리 (ChromaDB HTTP Client)
 │   └── requirements.txt   # Tool Server 의존성
 ├── scripts/                # 유틸리티 스크립트
-│   └── indexing.py        # 메타데이터 인덱싱 스크립트 (Option 2)
+│   └── indexing.py        # 메타데이터 인덱싱 스크립트
 ├── reference.py           # 데이터 마트 API 레퍼런스
 └── claude.md              # 이 파일
 ```
@@ -105,7 +103,8 @@ DATA_MART_URL=      # 데이터 마트 포털 URL
 USER_ID=            # 사용자 ID
 PROGRAM_ID=         # 프로그램 ID
 JOB_ID=             # 작업 ID
-OPENAI_API_KEY=     # OpenAI API 키 (RAG 임베딩용, Option 2 선택 시)
+CHROMADB_URL=       # ChromaDB HTTP 서버 URL (예: http://localhost:8000)
+EMBEDDING_URL=      # DNA 임베딩 모델 서버 URL
 ```
 
 ## 코딩 스타일
@@ -253,13 +252,13 @@ Data Mart API 클라이언트 모듈.
 
 #### 구현할 Tool 목록
 
-**기본 Tool**:
+**데이터 마트 Tool**:
 - `authenticate`: 사용자 인증 및 토큰 발급
-- `get_data`: 프로그램 데이터 조회
+- `get_data`: 프로그램 데이터 조회 (필터는 선택 사항)
 - `get_metadata`: 컬럼 메타데이터 조회
-- `create_filter`: 동적 필터 생성
+- `create_filter`: 동적 필터 생성 (다양한 연산자 지원)
 
-**RAG Tool (Option 2 선택 시)**:
+**RAG Tool**:
 - `search_metadata`: 자연어로 컬럼 메타데이터 검색
 - `search_query_pattern`: 과거 성공한 쿼리 패턴 검색
 
@@ -312,9 +311,9 @@ agent = Agent(
 response = agent.run("2026년 1월 1일부터 5일까지 데이터를 조회해줘")
 ```
 
-#### Option 2 RAG를 활용한 Agent 워크플로우
+#### RAG를 활용한 Agent 워크플로우
 
-RAG Tool을 포함한 Tool Server 사용 시 Agent의 처리 흐름:
+Agent가 RAG Tool을 활용하는 처리 흐름:
 
 ```python
 # Agent가 자동으로 수행하는 작업 (예시)
@@ -401,295 +400,38 @@ python main.py
 
 **핵심**: 두 컴포넌트는 MCP 프로토콜로만 통신하며, 서로의 구현 세부사항을 알 필요 없음
 
-## RAG (Retrieval-Augmented Generation) 구성
+## RAG 구성
 
 ### RAG 적용 목적
 
-데이터 마트 에이전트는 다음 문제를 해결하기 위해 RAG를 활용합니다:
-
-1. **컬럼명 모호성**: 사용자는 비즈니스 용어로 요청하지만 실제 컬럼명은 기술적 (예: "완료 시간" vs "lot_compt_date_time")
-2. **스키마 복잡성**: 수백 개의 컬럼과 다양한 프로그램 ID별 스키마 차이
-3. **쿼리 패턴 학습**: 자주 사용되는 필터 조합과 성공한 쿼리 재활용
-4. **도메인 지식**: 컬럼 간 관계, 유효한 값 범위, 비즈니스 규칙
-
-### RAG 아키텍처
-
-```
-┌──────────────┐
-│   User       │
-│   Query      │
-└──────┬───────┘
-       │
-       v
-┌──────────────────────────────────────────────────────┐
-│                    Agent                              │
-│  ┌────────────────────────────────────────────────┐  │
-│  │  1. RAG: 관련 메타데이터/패턴 검색             │  │
-│  │  2. LLM: 컨텍스트 기반 쿼리 생성              │  │
-│  │  3. MCP: Tool 호출                            │  │
-│  └────────────────────────────────────────────────┘  │
-└───────────────┬──────────────────────────────────────┘
-                │
-       ┌────────┴────────┐
-       v                 v
-┌─────────────┐   ┌─────────────┐
-│  Vector DB  │   │ Tool Server │
-│  (RAG)      │   │  (MCP)      │
-└─────────────┘   └─────────────┘
-```
+비즈니스 용어와 기술 컬럼명 간 매핑, 복잡한 스키마 이해, 과거 성공 쿼리 재사용을 위해 RAG를 활용합니다.
 
 ### RAG 데이터 소스
 
-#### 1. 메타데이터 벡터 DB
+**1. 메타데이터 벡터 DB**: 컬럼명, 데이터 타입, 비즈니스명, 설명, 샘플값
+**2. 쿼리 패턴 벡터 DB**: 과거 성공한 쿼리, 생성된 필터, 결과 건수
+**3. 도메인 용어 매핑**: 비즈니스 용어와 기술 컬럼명 매핑
 
-**인덱싱 대상**:
-```json
-{
-  "program_id": "JN00000",
-  "column_name": "x.lot_compt_date_time",
-  "data_type": "TIMESTAMP",
-  "business_name": "로트 완료 시간",
-  "description": "작업 로트가 완료된 날짜 및 시간",
-  "sample_values": ["2026-01-01 00:00:00", "2026-01-01 00:05:00"],
-  "related_columns": ["x.lot_start_date_time", "x.lot_id"],
-  "common_filters": ["BETWEEN", "GT", "LT"]
-}
-```
+### Tool Server에 RAG 통합
 
-**검색 예시**:
-- 사용자 쿼리: "완료 시간이 1월 1일인 데이터"
-- RAG 검색: "lot_compt_date_time" 메타데이터 반환
-- Agent: TIMESTAMP 타입이므로 BETWEEN 필터 사용
-
-#### 2. 쿼리 패턴 벡터 DB
-
-**인덱싱 대상**:
-```json
-{
-  "user_query": "지난주 완료된 로트 조회",
-  "generated_filter": {
-    "x.lot_compt_date_time": {
-      "data_value": "2025-12-25 00:00:00|2025-12-31 23:59:59",
-      "data_type": "TIMESTAMP",
-      "data_operator": "BETWEEN"
-    }
-  },
-  "program_id": "JN00000",
-  "success": true,
-  "result_count": 1500
-}
-```
-
-**활용**:
-- 유사한 과거 쿼리 검색
-- 성공한 필터 패턴 재사용
-- 컬럼 조합 패턴 학습
-
-#### 3. 도메인 용어 매핑
-
-**인덱싱 대상**:
-```json
-{
-  "business_term": "로트",
-  "technical_terms": ["lot_id", "lot_compt_date_time", "lot_start_date_time"],
-  "context": "제조 공정에서 하나의 작업 단위",
-  "synonyms": ["배치", "작업 단위"]
-}
-```
-
-### 구현 방법
-
-#### Option 1: Agent 레벨 RAG (권장)
-
-Agent가 직접 Vector DB에 접근:
-
-```python
-from google.genai import Agent
-from chromadb import Client
-
-# Vector DB 초기화
-vector_db = Client()
-metadata_collection = vector_db.get_collection("datamart_metadata")
-
-# Agent 설정
-agent = Agent(
-    model="gemini-2.0-flash",
-    tools=[mcp_client.get_tools()],
-    instruction="""
-    사용자 쿼리를 받으면:
-    1. Vector DB에서 관련 컬럼 메타데이터 검색
-    2. 검색된 정보로 정확한 컬럼명과 데이터 타입 파악
-    3. create_filter tool로 필터 생성
-    4. get_data tool로 데이터 조회
-    """
-)
-
-# 대화 시 RAG 컨텍스트 주입
-user_query = "1월 1일 완료된 로트를 보여줘"
-relevant_metadata = metadata_collection.query(user_query, n_results=3)
-response = agent.run(f"컨텍스트: {relevant_metadata}\n\n쿼리: {user_query}")
-```
-
-**장점**:
-- Agent가 컨텍스트를 직접 활용
-- LLM이 메타데이터 기반으로 더 정확한 판단
-- 쿼리 히스토리 학습 가능
-
-#### Option 2: Tool Server에 RAG Tool 추가
-
-Tool Server에 RAG 검색 tool 추가:
-
-```python
-# Tool Server (FastMCP)
-@mcp.tool()
-def search_metadata(query: str, top_k: int = 5) -> list:
-    """
-    사용자 쿼리와 관련된 컬럼 메타데이터를 검색합니다.
-
-    Args:
-        query: 검색 쿼리 (자연어)
-        top_k: 반환할 결과 개수
-
-    Returns:
-        관련 컬럼 메타데이터 리스트
-    """
-    results = vector_db.query(query, n_results=top_k)
-    return results
-
-@mcp.tool()
-def search_query_pattern(query: str, program_id: str) -> dict:
-    """
-    유사한 과거 쿼리 패턴을 검색합니다.
-    """
-    patterns = pattern_db.query(query, filter={"program_id": program_id})
-    return patterns
-```
-
-**Agent 활용**:
-```python
-# Agent가 먼저 search_metadata tool 호출
-metadata = mcp_client.call("search_metadata", {"query": "완료 시간"})
-
-# 메타데이터 기반으로 필터 생성
-filter_result = mcp_client.call("create_filter", {
-    "column": metadata[0]["column_name"],
-    "value": "2026-01-01",
-    "operator": "EQ"
-})
-```
-
-**장점**:
-- Tool Server가 RAG 로직 캡슐화
-- Agent는 tool 호출만 하면 됨
-- 독립적으로 RAG 시스템 업데이트 가능
-
-### Option 2 추천 기술 스택
-
-Tool Server에 RAG를 통합하는 경우 다음 스택을 추천합니다:
-
-#### Vector DB: ChromaDB
-
-**선택 이유**:
-- FastMCP와 같은 Python 생태계, 통합 용이
-- 로컬 파일 기반으로 Tool Server와 함께 배포 가능
-- 설정 없이 즉시 시작 가능
-- 메타데이터 필터링 지원 (program_id별 검색)
-
-**설치**:
-```bash
-pip install chromadb
-```
-
-**기본 사용**:
-```python
-import chromadb
-
-# Tool Server 내부에서 초기화
-client = chromadb.PersistentClient(path="./tools/vectordb")
-collection = client.get_or_create_collection(
-    name="datamart_metadata",
-    metadata={"hnsw:space": "cosine"}
-)
-```
-
-**프로덕션 전환 시**: Qdrant로 교체 (API 호환성 높음)
-
-#### Embedding Model: OpenAI text-embedding-3-small
-
-**선택 이유**:
-- 한글 비즈니스 용어 임베딩 성능 우수
-- 저렴한 비용 (1M 토큰당 $0.02)
-- 1536 차원으로 충분한 표현력
-- 간단한 API
-
-**설치**:
-```bash
-pip install openai
-```
-
-**사용**:
-```python
-from openai import OpenAI
-
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-def get_embedding(text: str) -> list:
-    response = client.embeddings.create(
-        model="text-embedding-3-small",
-        input=text
-    )
-    return response.data[0].embedding
-```
-
-**대안**: Gemini text-embedding-004 (Google 계정 활용 시)
-```python
-import google.generativeai as genai
-
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-
-def get_embedding(text: str) -> list:
-    result = genai.embed_content(
-        model="models/text-embedding-004",
-        content=text,
-        task_type="retrieval_document"
-    )
-    return result['embedding']
-```
-
-### 벡터 DB 비교
-
-| 항목 | ChromaDB | Qdrant | Pinecone |
-|------|----------|--------|----------|
-| 배포 방식 | 로컬 파일/서버 | 자체 호스팅/클라우드 | 클라우드 전용 |
-| Python 통합 | 네이티브 | 클라이언트 라이브러리 | 클라이언트 라이브러리 |
-| 필터링 | 기본 지원 | 강력한 필터링 | 제한적 |
-| 비용 | 무료 | 무료(셀프)/유료(클라우드) | 유료 |
-| Tool Server 통합 | 매우 쉬움 | 보통 | 보통 |
-| **추천** | **개발/초기** | **프로덕션** | 클라우드 우선 시 |
-
-### Option 2 구현 예시 (Tool Server)
-
-**전체 구조**:
-```
-tools/
-├── server.py           # FastMCP 서버 메인
-├── datamart_client.py  # 데이터 마트 API 클라이언트
-├── rag_manager.py      # RAG 관리 (Vector DB, Embedding)
-├── vectordb/           # ChromaDB 저장소
-└── requirements.txt
-```
+#### ChromaDB HTTP Client 사용
 
 **rag_manager.py**:
 ```python
 import chromadb
-from openai import OpenAI
+import requests
 from typing import List, Dict
 import os
 
 class RAGManager:
     def __init__(self):
-        self.chroma_client = chromadb.PersistentClient(path="./vectordb")
-        self.openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        # ChromaDB HTTP Client (Docker 별도 실행)
+        self.chroma_client = chromadb.HttpClient(
+            host=os.getenv("CHROMADB_URL", "http://localhost:8000")
+        )
+
+        # DNA 임베딩 모델 서버 URL
+        self.embedding_url = os.getenv("EMBEDDING_URL")
 
         self.metadata_collection = self.chroma_client.get_or_create_collection(
             name="datamart_metadata",
@@ -702,15 +444,17 @@ class RAGManager:
         )
 
     def get_embedding(self, text: str) -> List[float]:
-        response = self.openai_client.embeddings.create(
-            model="text-embedding-3-small",
-            input=text
+        """DNA 임베딩 모델 서버 호출"""
+        response = requests.post(
+            f"{self.embedding_url}/embed",
+            json={"text": text},
+            timeout=30
         )
-        return response.data[0].embedding
+        response.raise_for_status()
+        return response.json()["embedding"]
 
     def search_metadata(self, query: str, program_id: str = None, top_k: int = 5) -> List[Dict]:
         embedding = self.get_embedding(query)
-
         where = {"program_id": program_id} if program_id else None
 
         results = self.metadata_collection.query(
@@ -757,8 +501,8 @@ def search_metadata(query: str, program_id: str = None, top_k: int = 5) -> list:
     사용자 쿼리와 관련된 컬럼 메타데이터를 검색합니다.
 
     Args:
-        query: 검색 쿼리 (자연어, 예: "완료 시간", "로트 ID")
-        program_id: 프로그램 ID (선택, 예: "JN00000")
+        query: 검색 쿼리 (자연어, 예: "완료 시간")
+        program_id: 프로그램 ID (선택)
         top_k: 반환할 결과 개수
 
     Returns:
@@ -768,17 +512,7 @@ def search_metadata(query: str, program_id: str = None, top_k: int = 5) -> list:
 
 @mcp.tool()
 def search_query_pattern(query: str, program_id: str, top_k: int = 3) -> list:
-    """
-    유사한 과거 쿼리 패턴을 검색합니다.
-
-    Args:
-        query: 사용자 쿼리 (자연어)
-        program_id: 프로그램 ID
-        top_k: 반환할 패턴 개수
-
-    Returns:
-        과거 성공한 쿼리 패턴 리스트
-    """
+    """유사한 과거 쿼리 패턴 검색"""
     return rag.search_query_pattern(query, program_id, top_k)
 
 @mcp.tool()
@@ -788,135 +522,66 @@ def authenticate(user_id: str) -> str:
 
 @mcp.tool()
 def get_data(program_id: str, token: str, filters: dict = None) -> dict:
-    """데이터 조회"""
+    """데이터 조회 (필터는 선택 사항)"""
     return datamart.get_data(program_id, token, filters)
 
-# ... 기타 tool들
+@mcp.tool()
+def create_filter(column_name: str, value: str, data_type: str, operator: str, base_filter: dict = None) -> dict:
+    """
+    동적 필터 생성
+
+    Args:
+        column_name: 컬럼명
+        value: 필터 값 (BETWEEN, IN 등은 "|"로 구분)
+        data_type: VARCHAR, DOUBLE, BIGINT, DATE, TIMESTAMP
+        operator: EQ, IN, NOT_IN, BETWEEN, GT, LT, LIKE 등
+        base_filter: 기존 필터에 추가할 경우
+
+    Returns:
+        생성된 필터 딕셔너리
+    """
+    # reference.py의 make_filter 로직 구현
+    pass
 ```
 
 **requirements.txt**:
 ```
 fastmcp
 chromadb
-openai
 requests
 pandas
 python-dotenv
 ```
 
-### 메타데이터 수집 및 인덱싱
+#### DNA 임베딩 모델
 
-```python
-# 메타데이터 수집 스크립트
-def collect_metadata(program_id: str) -> list:
-    """데이터 마트에서 메타데이터 수집"""
-    token = authenticate(user_id)
-    metadata = get_metadata(program_id, token)
-
-    enriched = []
-    for col in metadata:
-        # 샘플 데이터 조회로 실제 값 확인
-        sample_data = get_data(program_id, token, limit=10)
-
-        enriched.append({
-            "column_name": col["name"],
-            "data_type": col["type"],
-            "business_name": infer_business_name(col["name"]),  # 수동 매핑 또는 LLM 추론
-            "sample_values": sample_data[col["name"]].tolist()[:5],
-            "description": generate_description(col, sample_data)  # LLM으로 설명 생성
-        })
-
-    return enriched
-
-# Vector DB에 인덱싱
-def index_metadata(metadata_list: list):
-    collection.add(
-        documents=[json.dumps(m) for m in metadata_list],
-        metadatas=metadata_list,
-        ids=[m["column_name"] for m in metadata_list]
-    )
-```
-
-### RAG 워크플로우 예시
-
-**시나리오**: "지난주 완료된 로트 중 오류가 있는 것만 보여줘"
-
-1. **RAG 검색**:
-   - Query: "완료 시간" → 결과: `lot_compt_date_time` (TIMESTAMP)
-   - Query: "오류" → 결과: `error_flag` (VARCHAR)
-
-2. **Agent 판단**:
-   - "지난주" → BETWEEN 필터 (7일 전 ~ 어제)
-   - "오류가 있는" → error_flag = 'Y' 또는 IN ('ERROR', 'FAIL')
-
-3. **Tool 호출**:
-   ```python
-   filter1 = create_filter("lot_compt_date_time", "2025-12-25|2026-01-01", "TIMESTAMP", "BETWEEN")
-   filter2 = create_filter("error_flag", "Y", "VARCHAR", "EQ", filter1)
-   data = get_data("JN00000", token, filter2)
-   ```
-
-### 지속적 개선
-
-1. **쿼리 피드백 수집**:
-   - 성공/실패한 쿼리 기록
-   - 사용자 만족도 수집
-
-2. **메타데이터 갱신**:
-   - 주기적으로 데이터 마트 스키마 변경 감지
-   - 새로운 컬럼/프로그램 ID 자동 인덱싱
-
-3. **패턴 학습**:
-   - 자주 사용되는 필터 조합 우선순위화
-   - 도메인 용어 매핑 자동 확장
+Qwen 14B 기반 한글 특화 모델을 별도 서버로 실행하여 사용합니다.
 
 ## TODO
 
-### 1단계: Tool Server 개발 (Option 2 RAG 포함)
+### 1단계: Tool Server 개발
 - [ ] FastMCP 프로젝트 초기화
-- [ ] 데이터 마트 API 클라이언트 구현 (datamart_client.py)
-- [ ] 기본 tool 구현:
-  - [ ] `authenticate` tool
-  - [ ] `get_data` tool
-  - [ ] `get_metadata` tool
-  - [ ] `create_filter` tool
-- [ ] RAG 시스템 구현 (rag_manager.py):
-  - [ ] ChromaDB 초기화 및 설정
-  - [ ] OpenAI Embedding 연동
-  - [ ] `search_metadata` tool 구현
-  - [ ] `search_query_pattern` tool 구현
-- [ ] 메타데이터 인덱싱 스크립트 작성 (scripts/indexing.py)
-- [ ] MCP Inspector로 각 tool 단독 테스트
+- [ ] 데이터 마트 API 클라이언트 (datamart_client.py)
+- [ ] 기본 tool: authenticate, get_data, get_metadata, create_filter
+- [ ] RAG 시스템 (rag_manager.py):
+  - [ ] ChromaDB HTTP Client 연동
+  - [ ] DNA 임베딩 모델 연동
+  - [ ] search_metadata, search_query_pattern tool
+- [ ] 메타데이터 인덱싱 스크립트 (scripts/indexing.py)
+- [ ] MCP Inspector로 단독 테스트
 
-### 2단계: Agent 개발 (RAG Tool 활용)
-- [ ] Google Agent Development Kit 프로젝트 초기화
-- [ ] MCP 클라이언트 구현 (Tool Server 연결)
-- [ ] Agent instruction 작성:
-  - [ ] RAG Tool 우선 사용 로직 (search_metadata, search_query_pattern)
-  - [ ] 메타데이터 기반 필터 생성 로직
-  - [ ] 데이터 조회 및 응답 포맷팅
-- [ ] 기본 대화 흐름 구현
-- [ ] 에러 처리 및 재시도 로직
+### 2단계: Agent 개발
+- [ ] Google Agent Development Kit 초기화
+- [ ] MCP 클라이언트 구현
+- [ ] Agent instruction 작성 (RAG Tool 우선 사용)
+- [ ] 대화 흐름 및 에러 처리
 
 ### 3단계: 통합 및 테스트
-- [ ] Tool Server 실행 확인 (RAG 포함)
-- [ ] Agent와 Tool Server 연동
-- [ ] RAG 기능 테스트:
-  - [ ] search_metadata tool 정확도 확인
-  - [ ] 비즈니스 용어 → 기술 컬럼명 변환 검증
-  - [ ] search_query_pattern tool 유용성 평가
+- [ ] Tool Server와 Agent 연동
+- [ ] RAG 기능 검증 (비즈니스 용어 → 기술 컬럼명 변환)
 - [ ] 다양한 쿼리 시나리오 테스트
-- [ ] 에러 처리 및 사용자 피드백 개선
 
-### 4단계: RAG 성능 개선
-- [ ] 추가 메타데이터 인덱싱 (다른 program_id)
-- [ ] 쿼리 패턴 수집 및 인덱싱 (사용자 피드백 기반)
-- [ ] 도메인 용어 매핑 확장
-- [ ] 임베딩 품질 개선 (필요 시 fine-tuning)
-- [ ] Vector DB 프로덕션 전환 (Qdrant 고려)
-
-### 5단계: 문서화
-- [ ] Tool Server API 문서 작성 (RAG Tool 포함)
-- [ ] Agent 사용 가이드 작성
-- [ ] RAG 시스템 운영 가이드 작성
-- [ ] 예시 쿼리 및 응답 문서화
+### 4단계: 문서화
+- [ ] Tool Server API 문서
+- [ ] Agent 사용 가이드
+- [ ] 예시 쿼리 및 응답
