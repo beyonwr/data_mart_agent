@@ -21,8 +21,8 @@
 
 ```
 data_mart_agent/
-├── agent/          # Google Agent Development Kit 기반 에이전트 (독립 실행)
-├── tools/          # FastMCP 기반 도구 서버 (독립 실행)
+├── agent/          # Google Agent Development Kit 기반 에이전트 (개발 예정)
+├── tools/          # FastMCP 기반 도구 서버 (✅ 이미 구현됨)
 ├── reference.py    # 데이터 마트 API 레퍼런스
 └── claude.md       # 이 파일
 ```
@@ -45,20 +45,16 @@ data_mart_agent/
                                                    └────────────────┘
 ```
 
-### 독립적 개발 전략
+### 개발 전제
 
-1. **Tool Server 우선 개발**
-   - 데이터 마트 API 클라이언트 구현
-   - MCP 프로토콜로 tool 노출
-   - 독립적으로 테스트 가능
+- **Tool Server**: ✅ 이미 구현 완료 (동료 작업)
+  - FastMCP 기반 MCP 서버로 데이터 마트 API 래핑
+  - MCP 프로토콜로 tool 노출
+  - 독립 프로세스로 실행 가능
 
-2. **Agent 개발**
-   - Tool Server와 무관하게 개발
-   - MCP 클라이언트만 구현하면 연결 가능
-
-3. **통합**
-   - MCP 표준 프로토콜로 연결
-   - 각 컴포넌트는 독립적으로 실행 및 배포
+- **Agent**: 🔄 개발 예정 (현재 작업)
+  - Tool Server의 MCP 인터페이스를 활용
+  - 구현 세부사항 몰라도 됨 (MCP 프로토콜만 준수)
 
 ## 데이터 마트 API
 
@@ -231,37 +227,91 @@ Data Mart API 클라이언트 모듈.
 
 ## 개발 가이드
 
-### Tool Server 개발 (우선 개발)
+### Tool Server (이미 구현됨)
 
-**목표**: Agent와 독립적으로 동작하는 MCP Tool Server 구현
+Tool Server는 동료가 이미 구현 완료했으며, 다음 기능을 MCP tool로 제공합니다:
 
-- FastMCP로 독립 실행 가능한 MCP 서버 구현
-- 데이터 마트 REST API를 MCP tool로 래핑
-- 주요 기능:
-  - `authenticate`: 사용자 인증 및 토큰 발급
-  - `get_data`: 프로그램 데이터 조회
-  - `get_metadata`: 컬럼 메타데이터 조회
-  - `create_filter`: 동적 필터 생성
-- **독립 테스트**: MCP Inspector 또는 CLI로 단독 테스트 가능
+- `authenticate`: 사용자 인증 및 토큰 발급
+- `get_data`: 프로그램 데이터 조회
+- `get_metadata`: 컬럼 메타데이터 조회
+- `create_filter`: 동적 필터 생성
 
-### Agent 개발 (후속 개발)
+**사용법**: Tool Server를 독립 프로세스로 실행하고 MCP 프로토콜로 연결
 
-**목표**: Tool Server와 독립적으로 동작하는 Agent 구현
+### Agent 개발 (현재 작업)
 
-- Google Agent Development Kit 사용
-- 사용자 자연어 요청을 해석하여 적절한 tool 호출
-- MCP 클라이언트 통해 Tool Server와 통신
-- Tool Server의 구현 세부사항 몰라도 됨 (MCP 인터페이스만 알면 됨)
+**목표**: Tool Server를 활용하여 데이터 마트 쿼리를 처리하는 AI Agent 구현
 
-### 통합
+#### 핵심 요구사항
 
-- Agent와 Tool Server는 각각 독립 프로세스로 실행
-- MCP 프로토콜로 통신 (stdio 또는 HTTP)
-- 각 컴포넌트는 독립적으로 업데이트/배포 가능
+1. **Google Agent Development Kit 활용**
+   - Agent 초기화 및 설정
+   - 대화 흐름 관리
+
+2. **MCP 클라이언트 구현**
+   - Tool Server와 MCP 프로토콜로 통신
+   - 사용 가능한 tool 목록 조회
+   - Tool 호출 및 결과 처리
+
+3. **자연어 이해 및 응답**
+   - 사용자 요청을 적절한 tool 호출로 변환
+   - 데이터 조회 결과를 사용자 친화적으로 포맷팅
+   - 필터 조건을 자연어에서 추출
+
+#### 구현 단계
+
+```python
+# 1. MCP 클라이언트 초기화
+mcp_client = MCPClient(server_url="...")
+
+# 2. Google Agent 설정
+agent = Agent(
+    model="gemini-2.0-flash",
+    tools=[mcp_client.get_tools()]  # Tool Server의 tool 연결
+)
+
+# 3. 대화 처리
+response = agent.run("2026년 1월 1일부터 5일까지 데이터를 조회해줘")
+```
+
+#### 예시 시나리오
+
+**사용자**: "JN00000 프로그램의 2026년 1월 1일 데이터를 보여줘"
+
+**Agent 처리 과정**:
+1. 요청 분석: program_id=JN00000, 날짜 필터 필요
+2. `create_filter` tool로 시간 필터 생성
+3. `get_data` tool로 데이터 조회
+4. 결과를 테이블 형식으로 포맷팅하여 응답
+
+### 통합 및 실행
+
+```bash
+# Terminal 1: Tool Server 실행 (이미 구현됨)
+cd tools/
+python server.py
+
+# Terminal 2: Agent 실행 (개발 예정)
+cd agent/
+python main.py
+```
+
+Agent와 Tool Server는 각각 독립 프로세스로 실행되며 MCP 프로토콜로 통신합니다.
 
 ## TODO
 
-- [ ] FastMCP 기반 Tool 서버 구현
-- [ ] Google Agent Development Kit 기반 Agent 구현
-- [ ] Agent와 Tool 연결
-- [ ] 테스트 및 문서화
+### Agent 개발
+- [ ] Google Agent Development Kit 프로젝트 초기화
+- [ ] MCP 클라이언트 구현 (Tool Server 연결)
+- [ ] 기본 대화 흐름 구현
+- [ ] 자연어 → 필터 변환 로직
+- [ ] 데이터 조회 결과 포맷팅
+
+### 통합 및 테스트
+- [ ] Tool Server와 연동 테스트
+- [ ] 다양한 쿼리 시나리오 테스트
+- [ ] 에러 처리 및 사용자 피드백 개선
+
+### 문서화
+- [ ] Agent 사용 가이드 작성
+- [ ] 예시 쿼리 및 응답 문서화
