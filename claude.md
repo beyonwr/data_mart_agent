@@ -16,6 +16,7 @@
 - **Tool Server**: FastMCP
 - **언어**: Python
 - **데이터 처리**: pandas, parquet
+- **RAG (선택)**: ChromaDB/Qdrant (Vector DB), OpenAI/Gemini Embeddings
 
 ## 프로젝트 구조
 
@@ -23,6 +24,10 @@
 data_mart_agent/
 ├── agent/          # Google Agent Development Kit 기반 에이전트 (개발 예정)
 ├── tools/          # FastMCP 기반 도구 서버 (개발 예정)
+├── rag/            # RAG 시스템 (선택 사항)
+│   ├── vectordb/   # Vector DB 데이터
+│   ├── embeddings/ # 임베딩 모델 관련
+│   └── indexing.py # 메타데이터 인덱싱 스크립트
 ├── reference.py    # 데이터 마트 API 레퍼런스
 └── claude.md       # 이 파일
 ```
@@ -319,6 +324,292 @@ python main.py
 
 **핵심**: 두 컴포넌트는 MCP 프로토콜로만 통신하며, 서로의 구현 세부사항을 알 필요 없음
 
+## RAG (Retrieval-Augmented Generation) 구성
+
+### RAG 적용 목적
+
+데이터 마트 에이전트는 다음 문제를 해결하기 위해 RAG를 활용합니다:
+
+1. **컬럼명 모호성**: 사용자는 비즈니스 용어로 요청하지만 실제 컬럼명은 기술적 (예: "완료 시간" vs "lot_compt_date_time")
+2. **스키마 복잡성**: 수백 개의 컬럼과 다양한 프로그램 ID별 스키마 차이
+3. **쿼리 패턴 학습**: 자주 사용되는 필터 조합과 성공한 쿼리 재활용
+4. **도메인 지식**: 컬럼 간 관계, 유효한 값 범위, 비즈니스 규칙
+
+### RAG 아키텍처
+
+```
+┌──────────────┐
+│   User       │
+│   Query      │
+└──────┬───────┘
+       │
+       v
+┌──────────────────────────────────────────────────────┐
+│                    Agent                              │
+│  ┌────────────────────────────────────────────────┐  │
+│  │  1. RAG: 관련 메타데이터/패턴 검색             │  │
+│  │  2. LLM: 컨텍스트 기반 쿼리 생성              │  │
+│  │  3. MCP: Tool 호출                            │  │
+│  └────────────────────────────────────────────────┘  │
+└───────────────┬──────────────────────────────────────┘
+                │
+       ┌────────┴────────┐
+       v                 v
+┌─────────────┐   ┌─────────────┐
+│  Vector DB  │   │ Tool Server │
+│  (RAG)      │   │  (MCP)      │
+└─────────────┘   └─────────────┘
+```
+
+### RAG 데이터 소스
+
+#### 1. 메타데이터 벡터 DB
+
+**인덱싱 대상**:
+```json
+{
+  "program_id": "JN00000",
+  "column_name": "x.lot_compt_date_time",
+  "data_type": "TIMESTAMP",
+  "business_name": "로트 완료 시간",
+  "description": "작업 로트가 완료된 날짜 및 시간",
+  "sample_values": ["2026-01-01 00:00:00", "2026-01-01 00:05:00"],
+  "related_columns": ["x.lot_start_date_time", "x.lot_id"],
+  "common_filters": ["BETWEEN", "GT", "LT"]
+}
+```
+
+**검색 예시**:
+- 사용자 쿼리: "완료 시간이 1월 1일인 데이터"
+- RAG 검색: "lot_compt_date_time" 메타데이터 반환
+- Agent: TIMESTAMP 타입이므로 BETWEEN 필터 사용
+
+#### 2. 쿼리 패턴 벡터 DB
+
+**인덱싱 대상**:
+```json
+{
+  "user_query": "지난주 완료된 로트 조회",
+  "generated_filter": {
+    "x.lot_compt_date_time": {
+      "data_value": "2025-12-25 00:00:00|2025-12-31 23:59:59",
+      "data_type": "TIMESTAMP",
+      "data_operator": "BETWEEN"
+    }
+  },
+  "program_id": "JN00000",
+  "success": true,
+  "result_count": 1500
+}
+```
+
+**활용**:
+- 유사한 과거 쿼리 검색
+- 성공한 필터 패턴 재사용
+- 컬럼 조합 패턴 학습
+
+#### 3. 도메인 용어 매핑
+
+**인덱싱 대상**:
+```json
+{
+  "business_term": "로트",
+  "technical_terms": ["lot_id", "lot_compt_date_time", "lot_start_date_time"],
+  "context": "제조 공정에서 하나의 작업 단위",
+  "synonyms": ["배치", "작업 단위"]
+}
+```
+
+### 구현 방법
+
+#### Option 1: Agent 레벨 RAG (권장)
+
+Agent가 직접 Vector DB에 접근:
+
+```python
+from google.genai import Agent
+from chromadb import Client
+
+# Vector DB 초기화
+vector_db = Client()
+metadata_collection = vector_db.get_collection("datamart_metadata")
+
+# Agent 설정
+agent = Agent(
+    model="gemini-2.0-flash",
+    tools=[mcp_client.get_tools()],
+    instruction="""
+    사용자 쿼리를 받으면:
+    1. Vector DB에서 관련 컬럼 메타데이터 검색
+    2. 검색된 정보로 정확한 컬럼명과 데이터 타입 파악
+    3. create_filter tool로 필터 생성
+    4. get_data tool로 데이터 조회
+    """
+)
+
+# 대화 시 RAG 컨텍스트 주입
+user_query = "1월 1일 완료된 로트를 보여줘"
+relevant_metadata = metadata_collection.query(user_query, n_results=3)
+response = agent.run(f"컨텍스트: {relevant_metadata}\n\n쿼리: {user_query}")
+```
+
+**장점**:
+- Agent가 컨텍스트를 직접 활용
+- LLM이 메타데이터 기반으로 더 정확한 판단
+- 쿼리 히스토리 학습 가능
+
+#### Option 2: Tool Server에 RAG Tool 추가
+
+Tool Server에 RAG 검색 tool 추가:
+
+```python
+# Tool Server (FastMCP)
+@mcp.tool()
+def search_metadata(query: str, top_k: int = 5) -> list:
+    """
+    사용자 쿼리와 관련된 컬럼 메타데이터를 검색합니다.
+
+    Args:
+        query: 검색 쿼리 (자연어)
+        top_k: 반환할 결과 개수
+
+    Returns:
+        관련 컬럼 메타데이터 리스트
+    """
+    results = vector_db.query(query, n_results=top_k)
+    return results
+
+@mcp.tool()
+def search_query_pattern(query: str, program_id: str) -> dict:
+    """
+    유사한 과거 쿼리 패턴을 검색합니다.
+    """
+    patterns = pattern_db.query(query, filter={"program_id": program_id})
+    return patterns
+```
+
+**Agent 활용**:
+```python
+# Agent가 먼저 search_metadata tool 호출
+metadata = mcp_client.call("search_metadata", {"query": "완료 시간"})
+
+# 메타데이터 기반으로 필터 생성
+filter_result = mcp_client.call("create_filter", {
+    "column": metadata[0]["column_name"],
+    "value": "2026-01-01",
+    "operator": "EQ"
+})
+```
+
+**장점**:
+- Tool Server가 RAG 로직 캡슐화
+- Agent는 tool 호출만 하면 됨
+- 독립적으로 RAG 시스템 업데이트 가능
+
+### 벡터 DB 선택
+
+**추천 스택**:
+
+1. **ChromaDB** (개발/테스트)
+   - 간단한 설치 및 사용
+   - 로컬 개발에 적합
+   - Python 네이티브 지원
+
+2. **Qdrant** (프로덕션)
+   - 높은 성능 및 확장성
+   - 필터링 기능 강력
+   - 자체 호스팅 가능
+
+3. **Pinecone** (클라우드)
+   - 완전 관리형 서비스
+   - 빠른 프로토타이핑
+
+### 임베딩 모델
+
+```python
+# OpenAI Embeddings (다국어 지원 우수)
+from openai import OpenAI
+client = OpenAI()
+
+embedding = client.embeddings.create(
+    model="text-embedding-3-small",
+    input="lot_compt_date_time: 로트 완료 시간"
+)
+
+# 또는 Gemini Embeddings
+from google import genai
+embedding = genai.embed_content(
+    model="models/text-embedding-004",
+    content="lot_compt_date_time: 로트 완료 시간"
+)
+```
+
+### 메타데이터 수집 및 인덱싱
+
+```python
+# 메타데이터 수집 스크립트
+def collect_metadata(program_id: str) -> list:
+    """데이터 마트에서 메타데이터 수집"""
+    token = authenticate(user_id)
+    metadata = get_metadata(program_id, token)
+
+    enriched = []
+    for col in metadata:
+        # 샘플 데이터 조회로 실제 값 확인
+        sample_data = get_data(program_id, token, limit=10)
+
+        enriched.append({
+            "column_name": col["name"],
+            "data_type": col["type"],
+            "business_name": infer_business_name(col["name"]),  # 수동 매핑 또는 LLM 추론
+            "sample_values": sample_data[col["name"]].tolist()[:5],
+            "description": generate_description(col, sample_data)  # LLM으로 설명 생성
+        })
+
+    return enriched
+
+# Vector DB에 인덱싱
+def index_metadata(metadata_list: list):
+    collection.add(
+        documents=[json.dumps(m) for m in metadata_list],
+        metadatas=metadata_list,
+        ids=[m["column_name"] for m in metadata_list]
+    )
+```
+
+### RAG 워크플로우 예시
+
+**시나리오**: "지난주 완료된 로트 중 오류가 있는 것만 보여줘"
+
+1. **RAG 검색**:
+   - Query: "완료 시간" → 결과: `lot_compt_date_time` (TIMESTAMP)
+   - Query: "오류" → 결과: `error_flag` (VARCHAR)
+
+2. **Agent 판단**:
+   - "지난주" → BETWEEN 필터 (7일 전 ~ 어제)
+   - "오류가 있는" → error_flag = 'Y' 또는 IN ('ERROR', 'FAIL')
+
+3. **Tool 호출**:
+   ```python
+   filter1 = create_filter("lot_compt_date_time", "2025-12-25|2026-01-01", "TIMESTAMP", "BETWEEN")
+   filter2 = create_filter("error_flag", "Y", "VARCHAR", "EQ", filter1)
+   data = get_data("JN00000", token, filter2)
+   ```
+
+### 지속적 개선
+
+1. **쿼리 피드백 수집**:
+   - 성공/실패한 쿼리 기록
+   - 사용자 만족도 수집
+
+2. **메타데이터 갱신**:
+   - 주기적으로 데이터 마트 스키마 변경 감지
+   - 새로운 컬럼/프로그램 ID 자동 인덱싱
+
+3. **패턴 학습**:
+   - 자주 사용되는 필터 조합 우선순위화
+   - 도메인 용어 매핑 자동 확장
+
 ## TODO
 
 ### 1단계: Tool Server 개발
@@ -346,3 +637,13 @@ python main.py
 - [ ] Tool Server API 문서 작성
 - [ ] Agent 사용 가이드 작성
 - [ ] 예시 쿼리 및 응답 문서화
+
+### 선택: RAG 통합 (성능 개선)
+- [ ] Vector DB 선택 및 설치 (ChromaDB/Qdrant)
+- [ ] 메타데이터 수집 스크립트 작성
+- [ ] 임베딩 모델 설정 (OpenAI/Gemini)
+- [ ] 메타데이터 인덱싱
+- [ ] Agent에 RAG 통합 (Option 1) 또는 Tool Server에 RAG tool 추가 (Option 2)
+- [ ] 쿼리 패턴 수집 및 인덱싱
+- [ ] 도메인 용어 매핑 구축
+- [ ] RAG 성능 평가 및 개선
