@@ -22,7 +22,7 @@
 ```
 data_mart_agent/
 ├── agent/          # Google Agent Development Kit 기반 에이전트 (개발 예정)
-├── tools/          # FastMCP 기반 도구 서버 (✅ 이미 구현됨)
+├── tools/          # FastMCP 기반 도구 서버 (개발 예정)
 ├── reference.py    # 데이터 마트 API 레퍼런스
 └── claude.md       # 이 파일
 ```
@@ -45,16 +45,21 @@ data_mart_agent/
                                                    └────────────────┘
 ```
 
-### 개발 전제
+### 개발 전략
 
-- **Tool Server**: ✅ 이미 구현 완료 (동료 작업)
-  - FastMCP 기반 MCP 서버로 데이터 마트 API 래핑
-  - MCP 프로토콜로 tool 노출
-  - 독립 프로세스로 실행 가능
+1. **Tool Server 개발** (우선)
+   - FastMCP로 독립 실행 가능한 MCP 서버 구현
+   - 데이터 마트 REST API를 MCP tool로 래핑
+   - MCP Inspector 또는 CLI로 단독 테스트
 
-- **Agent**: 🔄 개발 예정 (현재 작업)
-  - Tool Server의 MCP 인터페이스를 활용
-  - 구현 세부사항 몰라도 됨 (MCP 프로토콜만 준수)
+2. **Agent 개발** (후속)
+   - Google Agent Development Kit 기반
+   - Tool Server의 MCP 인터페이스 활용
+   - Tool Server 구현 세부사항 몰라도 됨 (MCP 프로토콜만 준수)
+
+3. **통합 테스트**
+   - Agent에서 Tool Server 연결
+   - 실제 데이터 마트 시나리오 테스트
 
 ## 데이터 마트 API
 
@@ -96,6 +101,7 @@ JOB_ID=             # 작업 ID
 - **타입 힌팅** 필수 사용 (`typing` 모듈)
 - **명확한 변수명** 사용 (축약 지양)
 - **한 함수는 한 가지 일만** (Single Responsibility)
+- **이모지 사용 금지** (코드, 주석, 문서, 커밋 메시지 모두)
 
 ### 네이밍 컨벤션
 ```python
@@ -227,18 +233,31 @@ Data Mart API 클라이언트 모듈.
 
 ## 개발 가이드
 
-### Tool Server (이미 구현됨)
+### Tool Server 개발 (1단계)
 
-Tool Server는 동료가 이미 구현 완료했으며, 다음 기능을 MCP tool로 제공합니다:
+**목표**: 데이터 마트 API를 MCP tool로 래핑한 독립 서버 구현
+
+#### 구현할 Tool 목록
 
 - `authenticate`: 사용자 인증 및 토큰 발급
 - `get_data`: 프로그램 데이터 조회
 - `get_metadata`: 컬럼 메타데이터 조회
 - `create_filter`: 동적 필터 생성
 
-**사용법**: Tool Server를 독립 프로세스로 실행하고 MCP 프로토콜로 연결
+#### 독립 테스트
 
-### Agent 개발 (현재 작업)
+Tool Server는 Agent 없이도 단독으로 테스트 가능:
+- MCP Inspector 사용
+- `mcp dev` CLI로 tool 호출 테스트
+- 각 tool의 입력/출력 검증
+
+```bash
+# Tool Server 단독 실행 및 테스트
+cd tools/
+mcp dev server.py
+```
+
+### Agent 개발 (2단계)
 
 **목표**: Tool Server를 활용하여 데이터 마트 쿼리를 처리하는 AI Agent 구현
 
@@ -284,34 +303,46 @@ response = agent.run("2026년 1월 1일부터 5일까지 데이터를 조회해�
 3. `get_data` tool로 데이터 조회
 4. 결과를 테이블 형식으로 포맷팅하여 응답
 
-### 통합 및 실행
+### 통합 및 실행 (3단계)
+
+Tool Server와 Agent를 각각 독립 프로세스로 실행:
 
 ```bash
-# Terminal 1: Tool Server 실행 (이미 구현됨)
+# Terminal 1: Tool Server 실행
 cd tools/
 python server.py
 
-# Terminal 2: Agent 실행 (개발 예정)
+# Terminal 2: Agent 실행
 cd agent/
 python main.py
 ```
 
-Agent와 Tool Server는 각각 독립 프로세스로 실행되며 MCP 프로토콜로 통신합니다.
+**핵심**: 두 컴포넌트는 MCP 프로토콜로만 통신하며, 서로의 구현 세부사항을 알 필요 없음
 
 ## TODO
 
-### Agent 개발
+### 1단계: Tool Server 개발
+- [ ] FastMCP 프로젝트 초기화
+- [ ] 데이터 마트 API 클라이언트 구현
+- [ ] `authenticate` tool 구현
+- [ ] `get_data` tool 구현
+- [ ] `get_metadata` tool 구현
+- [ ] `create_filter` tool 구현
+- [ ] MCP Inspector로 각 tool 단독 테스트
+
+### 2단계: Agent 개발
 - [ ] Google Agent Development Kit 프로젝트 초기화
 - [ ] MCP 클라이언트 구현 (Tool Server 연결)
 - [ ] 기본 대화 흐름 구현
-- [ ] 자연어 → 필터 변환 로직
+- [ ] 자연어에서 필터 조건 추출 로직
 - [ ] 데이터 조회 결과 포맷팅
 
-### 통합 및 테스트
-- [ ] Tool Server와 연동 테스트
+### 3단계: 통합 및 테스트
+- [ ] Tool Server와 Agent 연동
 - [ ] 다양한 쿼리 시나리오 테스트
 - [ ] 에러 처리 및 사용자 피드백 개선
 
-### 문서화
+### 4단계: 문서화
+- [ ] Tool Server API 문서 작성
 - [ ] Agent 사용 가이드 작성
 - [ ] 예시 쿼리 및 응답 문서화
